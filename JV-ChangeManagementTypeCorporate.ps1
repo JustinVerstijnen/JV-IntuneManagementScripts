@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-Sets macOS devices in Microsoft Intune directly to Corporate ownership.
+Sets all Microsoft Intune managed devices directly to Corporate ownership.
 
 .DESCRIPTION
-This script finds all Intune managed devices where operatingSystem = macOS
-and managedDeviceOwnerType is not equal to company.
+This script finds all Intune managed devices where managedDeviceOwnerType
+is not equal to company.
 
 By default, the script applies the change IMMEDIATELY.
 Use -DryRun if you only want to check what would be changed without making changes.
@@ -17,16 +17,19 @@ Use -DryRun if you only want to check what would be changed without making chang
 
 .EXAMPLES
 Apply changes directly:
-.\Set-IntuneMacsCorporate.ps1
+.\Set-IntuneAllDevicesCorporate.ps1
 
 Check only:
-.\Set-IntuneMacsCorporate.ps1 -DryRun
+.\Set-IntuneAllDevicesCorporate.ps1 -DryRun
 
 Specific tenant:
-.\Set-IntuneMacsCorporate.ps1 -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+.\Set-IntuneAllDevicesCorporate.ps1 -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 Only change Personal devices:
-.\Set-IntuneMacsCorporate.ps1 -Mode PersonalOnly
+.\Set-IntuneAllDevicesCorporate.ps1 -Mode PersonalOnly
+
+Only change Unknown/empty owner type devices:
+.\Set-IntuneAllDevicesCorporate.ps1 -Mode UnknownOnly
 #>
 
 param(
@@ -41,7 +44,7 @@ param(
     [string]$Mode = "AllNonCorporate",
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\Intune-MacOwnershipChange-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+    [string]$ReportPath = ".\Intune-AllDevicesOwnershipChange-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 )
 
 $ErrorActionPreference = "Stop"
@@ -175,7 +178,7 @@ function Get-AllGraphPages {
     return $items
 }
 
-function Get-IntuneManagedMacDevices {
+function Get-IntuneManagedDevices {
     $selectProperties = @(
         "id",
         "deviceName",
@@ -190,22 +193,17 @@ function Get-IntuneManagedMacDevices {
 
     $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$select=$selectProperties&`$top=100"
 
-    Write-Host "Retrieving Intune managed devices..." -ForegroundColor Cyan
+    Write-Host "Retrieving all Intune managed devices..." -ForegroundColor Cyan
 
     $devices = Get-AllGraphPages -Uri $uri
 
-    $macDevices = $devices | Where-Object {
-        $os = Get-SafePropertyValue -InputObject $_ -PropertyName "operatingSystem" -DefaultValue ""
-        $os -eq "macOS"
-    }
-
-    return @($macDevices)
+    return @($devices)
 }
 
 function Get-DevicesToChange {
     param(
         [Parameter(Mandatory = $true)]
-        [array]$MacDevices,
+        [array]$Devices,
 
         [Parameter(Mandatory = $true)]
         [string]$Mode
@@ -214,7 +212,7 @@ function Get-DevicesToChange {
     switch ($Mode) {
         "AllNonCorporate" {
             return @(
-                $MacDevices | Where-Object {
+                $Devices | Where-Object {
                     $ownerType = Get-SafePropertyValue -InputObject $_ -PropertyName "managedDeviceOwnerType" -DefaultValue ""
                     $ownerType -ne "company"
                 }
@@ -223,7 +221,7 @@ function Get-DevicesToChange {
 
         "PersonalOnly" {
             return @(
-                $MacDevices | Where-Object {
+                $Devices | Where-Object {
                     $ownerType = Get-SafePropertyValue -InputObject $_ -PropertyName "managedDeviceOwnerType" -DefaultValue ""
                     $ownerType -eq "personal"
                 }
@@ -232,7 +230,7 @@ function Get-DevicesToChange {
 
         "UnknownOnly" {
             return @(
-                $MacDevices | Where-Object {
+                $Devices | Where-Object {
                     $ownerType = Get-SafePropertyValue -InputObject $_ -PropertyName "managedDeviceOwnerType" -DefaultValue ""
                     $ownerType -eq "unknown" -or [string]::IsNullOrWhiteSpace($ownerType)
                 }
@@ -313,12 +311,12 @@ try {
     Test-GraphAuthenticationModule
     Connect-ToMicrosoftGraph -TenantId $TenantId
 
-    $macDevices = Get-IntuneManagedMacDevices
+    $allDevices = Get-IntuneManagedDevices
 
     Write-Host ""
-    Write-Host "Number of macOS devices found: $($macDevices.Count)" -ForegroundColor Cyan
+    Write-Host "Number of Intune managed devices found: $($allDevices.Count)" -ForegroundColor Cyan
 
-    $devicesToChange = Get-DevicesToChange -MacDevices $macDevices -Mode $Mode
+    $devicesToChange = Get-DevicesToChange -Devices $allDevices -Mode $Mode
 
     Write-Host "Number of devices that will be changed: $($devicesToChange.Count)" -ForegroundColor Yellow
     Write-Host ""
@@ -337,13 +335,14 @@ try {
     foreach ($device in $devicesToChange) {
         $deviceName = Get-SafePropertyValue -InputObject $device -PropertyName "deviceName" -DefaultValue ""
         $serialNumber = Get-SafePropertyValue -InputObject $device -PropertyName "serialNumber" -DefaultValue ""
+        $operatingSystem = Get-SafePropertyValue -InputObject $device -PropertyName "operatingSystem" -DefaultValue ""
         $oldOwnerType = Get-SafePropertyValue -InputObject $device -PropertyName "managedDeviceOwnerType" -DefaultValue ""
 
         if ([string]::IsNullOrWhiteSpace($oldOwnerType)) {
             $oldOwnerType = "empty"
         }
 
-        Write-Host "Device: $deviceName | Serial: $serialNumber | OwnerType: $oldOwnerType" -ForegroundColor Cyan
+        Write-Host "Device: $deviceName | OS: $operatingSystem | Serial: $serialNumber | OwnerType: $oldOwnerType" -ForegroundColor Cyan
 
         if ($DryRun) {
             $results += New-ResultObject `
@@ -378,7 +377,7 @@ try {
         }
     }
 
-    $alreadyCorporateDevices = $macDevices | Where-Object {
+    $alreadyCorporateDevices = $allDevices | Where-Object {
         $ownerType = Get-SafePropertyValue -InputObject $_ -PropertyName "managedDeviceOwnerType" -DefaultValue ""
         $ownerType -eq "company"
     }
